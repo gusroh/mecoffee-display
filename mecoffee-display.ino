@@ -2,13 +2,17 @@
 #include <BLEUtils.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
-#include <TFT_eSPI.h>
-#include "Button2.h"
+
+#include <Button2.h>
+
+#include <SPI.h>
+#include <TFT_eSPI.h> // Hardware-specific library
+
+TFT_eSPI tft = TFT_eSPI(); // Invoke custom library
 
 #define BUTTON_1            35
 #define BUTTON_2            0
 
-TFT_eSPI tft = TFT_eSPI(135, 240); // Invoke custom library
 Button2 btn1(BUTTON_1);
 Button2 btn2(BUTTON_2);
 
@@ -25,7 +29,6 @@ static unsigned long shotStarted = -1;
 
 static BLEAdvertisedDevice* myDevice;
 static BLERemoteCharacteristic* pRemoteCharacteristic;
-
 
 static String currentShotTime = "";
 static String currentTemperature = "";
@@ -47,15 +50,19 @@ void setup() {
   Serial.println("Scanning...");
   
   tft.init();
+    
+  // Rotate screen to landscape mode
+  tft.setRotation(1);
 
   tft.fillScreen(TFT_BLACK); // Clear Screen
+  tft.setTextSize(3);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Scanning...",  tft.width() / 2, tft.height() / 2 );
-  tft.setTextDatum(MR_DATUM);
+  //tft.setTextDatum(MR_DATUM);
 
   delay(2000);
-  tft.setTextSize(5);
+  //tft.setTextSize(5);
   sleepDisplay();
   
   BLEDevice::init("");
@@ -68,24 +75,45 @@ void setup() {
 
 class MyClientCallback : public BLEClientCallbacks {
   void onConnect(BLEClient* pclient) {
+    sleepDisplay();
+    tft.fillScreen(TFT_BLACK); // Clear Screen
+    tft.setTextSize(3);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("Connected",  tft.width() / 2, tft.height() / 2 );
+    tft.setTextDatum(MR_DATUM);
+  
+    delay(2000);
+    
+    tft.setTextSize(5);
+    sleepDisplay();
+      
     currentShotTime = "";
     currentTemperature = "";
-    drawShotTime("0s", TFT_LIGHTGREY);
+    //drawShotTime("0s", TFT_LIGHTGREY);
   }
 
   void onDisconnect(BLEClient* pclient) {
     connected = false;
     brewing = false;
     Serial.println("onDisconnect");
+    
+    tft.fillScreen(TFT_BLACK); // Clear Screen
+    tft.setTextSize(3);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("Disconnected",  tft.width() / 2, tft.height() / 2 );
+    
+    delay(2000);
     sleepDisplay();  
   }
 };
 
 void drawTemperature(String temperature, uint16_t color) {
   if (currentTemperature != temperature) {
-    if (currentTemperature.length() == 4 && temperature.length() == 3) {
+    if (currentTemperature.length() > temperature.length()) {
       tft.setTextColor(TFT_BLACK, TFT_BLACK);
-      tft.drawString(currentTemperature, tft.width() - 7, tft.height() / 4 + 10 );      
+      tft.drawString(currentTemperature, tft.width() - 7, tft.height() / 4 + 10 );
     }
   
     currentTemperature = temperature;
@@ -97,8 +125,10 @@ void drawTemperature(String temperature, uint16_t color) {
 
 void drawShotTime(String shotTime, uint16_t color) {
   if (currentShotTime != shotTime) {
-//    tft.setTextColor(TFT_BLACK, TFT_BLACK);
-//    tft.drawString(currentShotTime, tft.width() - 5, 3 * (tft.height() / 4) );
+    if (currentShotTime.length() > shotTime.length()) {
+      tft.setTextColor(TFT_BLACK, TFT_BLACK);
+      tft.drawString(" " + currentShotTime, tft.width() - 7, 3 * (tft.height() / 4) - 10 );
+    }
   
     currentShotTime = shotTime;
     
@@ -116,13 +146,17 @@ static void notifyCallback(
     String sData = (char*)pData;
 
     if (sData.startsWith("tmp")) {
-      int i, reqTemp, curTemp;
+      int onTime, reqTemp, curTemp;
 
-      sscanf((char*)pData, "tmp %d %d %d", &i, &reqTemp, &curTemp);
+      sscanf((char*)pData, "tmp %d %d %d", &onTime, &reqTemp, &curTemp);
 
-      uint16_t color = (curTemp > (reqTemp - 100)) ? TFT_GREEN : TFT_ORANGE;
+      // Set acceptable temperature diff
+      float accDiff = 50; // 50 = 0.5C
+      uint16_t color = (curTemp > (reqTemp - accDiff) && curTemp < (reqTemp + accDiff)) ? TFT_GREEN : TFT_ORANGE;
       
-      drawTemperature(String(curTemp / 100) + "C", color);
+      float floatTemp = float(curTemp) / 100;
+      
+      drawTemperature(String(floatTemp) + "C", color);
     } else if (sData.startsWith("sht")) {
       int i, ms;
       uint16_t color;
@@ -132,17 +166,17 @@ static void notifyCallback(
         brewing = true;
         
         shotStarted = millis();
-        color = TFT_ORANGE;
+        color = TFT_YELLOW;
       } else {
         brewing = false;
-        color = TFT_GREEN;
+        color = TFT_LIGHTGREY;
       }
 
       drawShotTime(String(ms / 1000) + "s", color);
     }
 
     if (!sData.startsWith("sht") && brewing) {
-      drawShotTime(String((millis() - shotStarted) / 1000) + "s", TFT_ORANGE);
+      drawShotTime(String((millis() - shotStarted) / 1000) + "s", TFT_YELLOW);
     }
 }
 
