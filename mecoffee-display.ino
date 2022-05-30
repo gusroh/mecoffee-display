@@ -32,10 +32,19 @@ static unsigned long shotStarted = -1;
 static BLEAdvertisedDevice* myDevice;
 static BLERemoteCharacteristic* pRemoteCharacteristic;
 
-static boolean timerEnabled = true;
-static boolean timerRunning = false;
+static boolean warmupEnabled = true;
+static boolean warmupRunning = false;
 static int warmupTime;
 static boolean warmupNeeded = false;
+
+static boolean cleaning = false;
+static int cleanReps = 5;
+static int cleanTime = 10; // Seconds
+static int cleanCount;
+static boolean waiting = false;
+static unsigned long waitStarted = -1;
+static boolean rinsing = false;
+static boolean rinsed = false;
 
 static String currentShotTime = "";
 static String currentTemperature = "";
@@ -71,10 +80,12 @@ void setup() {
   sleepDisplay();
 
   btn1.begin(BUTTON_1);
-  btn1.setReleasedHandler(released);
+  btn1.setLongClickTime(2000);
+  btn1.setClickHandler(singleClick);
+  btn1.setLongClickDetectedHandler(longClickDetected);
 
   btn2.begin(BUTTON_2);
-  btn2.setReleasedHandler(released);
+  btn2.setClickHandler(singleClick);
   
   BLEDevice::init("");
   pBLEScan = BLEDevice::getScan(); //create new scan
@@ -93,7 +104,7 @@ class MyClientCallback : public BLEClientCallbacks {
     tft.setTextDatum(MC_DATUM);
     tft.drawString("Connected.",  tft.width() / 2, tft.height() / 2 );
     tft.setTextDatum(MR_DATUM);
-  
+    
     delay(2000);
     
     tft.setTextSize(5);
@@ -101,7 +112,7 @@ class MyClientCallback : public BLEClientCallbacks {
     
     currentShotTime = "";
     currentTemperature = "";
-    if (!timerEnabled) {
+    if (!warmupEnabled) {
       drawShotTime("0s", TFT_LIGHTGREY);
     }
   }
@@ -122,58 +133,74 @@ class MyClientCallback : public BLEClientCallbacks {
   }
 };
 
-void enableTimer() {
-  timerEnabled = true;
-  Serial.println("Timer enabled");
+void enableWarmup() {
+  warmupEnabled = true;
+  Serial.println("Warmup enabled");
 }
 
-void disableTimer() {
-  timerEnabled = false;
-  timerRunning = false;
+void disableWarmup() {
+  warmupEnabled = false;
+  warmupRunning = false;
   warmupNeeded = false;
   warmupTime = 0;
   drawShotTime("0s", TFT_LIGHTGREY);
   currentShotTime = "";
-  Serial.println("Timer disabled");
+  Serial.println("Warmup disabled");
 }
 
-void initTimer(float floatTemp) {
+void initWarmup(float floatTemp) {
   if (floatTemp < 50) {
     warmupTime = 15 * 60; // 15 min
     warmupNeeded = true;
-    timerRunning = true;
+    warmupRunning = true;
   } else if (floatTemp < 70) {
     warmupTime = 10 * 60; // 10 min
     warmupNeeded = true;
-    timerRunning = true;
+    warmupRunning = true;
   } else if (floatTemp < 85) {
     warmupTime = 5 * 60; // 5 min
     warmupNeeded = true;
-    timerRunning = true;
+    warmupRunning = true;
   } else {
     warmupTime = 0 * 60; // 0 min
-    disableTimer();
+    disableWarmup();
   }
 }
 
-void updateTimer(int onTime) {
+void updateWarmupTimer(int onTime) {
   if (warmupNeeded) {
-  int warmupTimeDiff = warmupTime - onTime;
-  if (warmupTimeDiff < 0) {
-    disableTimer();
-  } else {
-    uint16_t color = TFT_RED;
-    char message[6];
-    if ((onTime % 5) == 0) {
-      int m = sprintf(message, "Warmup");
+    int warmupTimeDiff = warmupTime - onTime;
+    if (warmupTimeDiff < 0) {
+      disableWarmup();
     } else {
-      int warmupDiffMin = warmupTimeDiff / 60;
-      int warmupDiffSec = warmupTimeDiff - (warmupDiffMin * 60);
-      int m = sprintf(message, "%02dm%02ds", warmupDiffMin, warmupDiffSec);
+      uint16_t color = TFT_RED;
+      char message[6];
+      if ((onTime % 5) == 0) {
+        int m = sprintf(message, "Warmup");
+      } else {
+        int warmupDiffMin = warmupTimeDiff / 60;
+        int warmupDiffSec = warmupTimeDiff - (warmupDiffMin * 60);
+        int m = sprintf(message, "%02dm%02ds", warmupDiffMin, warmupDiffSec);
+      }
+      drawShotTime(message, color);
     }
-    drawShotTime(message, color);
   }
 }
+
+void startCleaning() {
+  cleaning = true;
+  Serial.println("Cleaning mode started");
+  drawShotTime("#Clean#", TFT_SKYBLUE);
+  delay(3000);
+  drawShotTime("-Flush-", TFT_SKYBLUE);
+}
+
+void stopCleaning() {
+  cleanCount = 0;
+  rinsing = false;
+  cleaning = false;
+  Serial.println("Cleaning mode stopped");
+  drawShotTime("0s", TFT_LIGHTGREY);
 }
 
 void drawTemperature(String temperature, uint16_t color) {
@@ -204,6 +231,28 @@ void drawShotTime(String shotTime, uint16_t color) {
   }
 }
 
+void drawCleanTime(unsigned long startTime) {
+  uint16_t color = TFT_SKYBLUE;
+  char message[7];
+  int cTime = (millis() - startTime);
+  int m = sprintf(message, "x%d %3ds", cleanCount, cTime / 1000);
+  //int m = sprintf(message, "%d/%d %2ds", cleanCount, cleanReps, cTime / 1000);
+  if (cTime >= (cleanTime * 1000)) {
+    color = TFT_GREEN;
+    if (cTime >= ((cleanTime + 1) * 1000)) {
+      if (waiting) {
+        drawShotTime("-Flush-", TFT_SKYBLUE);
+        waiting = false;
+        return;
+      } else {
+        drawShotTime("-Stop-", TFT_SKYBLUE);
+        return;
+      }
+    }
+  }
+  drawShotTime(message, color);
+}
+
 static void notifyCallback(
   BLERemoteCharacteristic* pBLERemoteCharacteristic,
   uint8_t* pData,
@@ -224,12 +273,16 @@ static void notifyCallback(
       
       drawTemperature(String(floatTemp) + "C", color);
 
-      if (timerEnabled) {
-        if (!timerRunning) {
-          initTimer(floatTemp);
+      if (warmupEnabled) {
+        if (!warmupRunning) {
+          initWarmup(floatTemp);
         } else {
-          updateTimer(onTime);
+          updateWarmupTimer(onTime);
         }
+      }
+      
+      if (cleaning && waiting) {
+        drawCleanTime(waitStarted);
       }
     } else if (sData.startsWith("sht")) {
       int i, ms;
@@ -246,11 +299,51 @@ static void notifyCallback(
         color = TFT_LIGHTGREY;
       }
 
-      drawShotTime(String(ms / 1000) + "s", color);
+      if (cleaning) {
+        color = TFT_SKYBLUE;
+        if (rinsing) {
+          if (!brewing) {
+            drawShotTime("-Flush-", color);
+            rinsing = false;
+            rinsed = true;
+          }
+        } else {
+          if (brewing) {
+            cleanCount++;
+            char message[7];
+            int m = sprintf(message, "x%d %3ds", cleanCount, ms / 1000);
+            //int m = sprintf(message, "%d/%d %2ds", cleanCount, cleanReps, ms / 1000);
+            drawShotTime(message, color);
+          } else {
+            if (cleanCount == cleanReps) {
+              if (rinsed) {
+                drawShotTime("-Done-", TFT_GREEN);
+                delay(3000);
+                stopCleaning();
+              } else {
+                cleanCount = 0;
+                drawShotTime("-Rinse-", color);
+                rinsing = true;
+              }
+            } else {
+              drawShotTime("-Wait-", color);
+              waiting = true;
+              delay(1000);
+              waitStarted = millis();
+            }
+          }
+        }
+      } else {
+        drawShotTime(String(ms / 1000) + "s", color);
+      }
     }
 
     if (!sData.startsWith("sht") && brewing) {
-      drawShotTime(String((millis() - shotStarted) / 1000) + "s", TFT_YELLOW);
+      if (cleaning && !rinsing) {
+        drawCleanTime(shotStarted);
+      } else {
+        drawShotTime(String((millis() - shotStarted) / 1000) + "s", TFT_YELLOW);
+      }
     }
 }
 
@@ -324,14 +417,26 @@ void loop() {
       doConnect = false;
     }
   }
-
-//  delay(2000);
 }
 
-void released(Button2& btn) {
-  if (btn == btn1) {
-    enableTimer();
-  } else if (btn == btn2) {
-    disableTimer();
+void singleClick(Button2& btn) {
+  if (!brewing && !cleaning) {
+    if (btn == btn1) {
+      enableWarmup();
+    } else if (btn == btn2) {
+      disableWarmup();
+    }
+  }
+}
+
+void longClickDetected(Button2& btn) {
+  if (!brewing && !warmupRunning) {
+    if (btn == btn1) {
+      if (!cleaning) {
+        startCleaning();
+      } else {
+        stopCleaning();
+      }
+    }
   }
 }
