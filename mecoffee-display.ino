@@ -85,7 +85,9 @@ void setup() {
   btn1.setLongClickDetectedHandler(longClickDetected);
 
   btn2.begin(BUTTON_2);
+  btn2.setLongClickTime(3000);
   btn2.setClickHandler(singleClick);
+  btn2.setLongClickDetectedHandler(longClickDetected);
   
   BLEDevice::init("");
   pBLEScan = BLEDevice::getScan(); //create new scan
@@ -437,6 +439,8 @@ void longClickDetected(Button2& btn) {
       } else {
         stopCleaning();
       }
+    } else if (btn == btn2) {
+      esp_deep_sleep_start();
     }
   }
 }
