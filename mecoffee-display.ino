@@ -13,8 +13,10 @@ TFT_eSPI tft = TFT_eSPI(); // Invoke custom library
 #define BUTTON_1            35
 #define BUTTON_2            0
 
-Button2 btn1(BUTTON_1);
-Button2 btn2(BUTTON_2);
+Button2 btn1, btn2;
+
+unsigned long previousMillis = 0;
+const long interval = 2000;
 
 int scanTime = 5; //In seconds
 BLEScan* pBLEScan;
@@ -29,6 +31,11 @@ static unsigned long shotStarted = -1;
 
 static BLEAdvertisedDevice* myDevice;
 static BLERemoteCharacteristic* pRemoteCharacteristic;
+
+static boolean timerEnabled = true;
+static boolean timerRunning = false;
+static int warmupTime;
+static boolean warmupNeeded = false;
 
 static String currentShotTime = "";
 static String currentTemperature = "";
@@ -50,7 +57,7 @@ void setup() {
   Serial.println("Scanning...");
   
   tft.init();
-    
+
   // Rotate screen to landscape mode
   tft.setRotation(1);
 
@@ -59,11 +66,15 @@ void setup() {
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Scanning...",  tft.width() / 2, tft.height() / 2 );
-  //tft.setTextDatum(MR_DATUM);
 
   delay(2000);
-  //tft.setTextSize(5);
   sleepDisplay();
+
+  btn1.begin(BUTTON_1);
+  btn1.setReleasedHandler(released);
+
+  btn2.begin(BUTTON_2);
+  btn2.setReleasedHandler(released);
   
   BLEDevice::init("");
   pBLEScan = BLEDevice::getScan(); //create new scan
@@ -80,17 +91,19 @@ class MyClientCallback : public BLEClientCallbacks {
     tft.setTextSize(3);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("Connected",  tft.width() / 2, tft.height() / 2 );
+    tft.drawString("Connected.",  tft.width() / 2, tft.height() / 2 );
     tft.setTextDatum(MR_DATUM);
   
     delay(2000);
     
     tft.setTextSize(5);
     sleepDisplay();
-      
+    
     currentShotTime = "";
     currentTemperature = "";
-    //drawShotTime("0s", TFT_LIGHTGREY);
+    if (!timerEnabled) {
+      drawShotTime("0s", TFT_LIGHTGREY);
+    }
   }
 
   void onDisconnect(BLEClient* pclient) {
@@ -102,18 +115,72 @@ class MyClientCallback : public BLEClientCallbacks {
     tft.setTextSize(3);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("Disconnected",  tft.width() / 2, tft.height() / 2 );
+    tft.drawString("Disconnected.",  tft.width() / 2, tft.height() / 2 );
     
     delay(2000);
     sleepDisplay();  
   }
 };
 
+void enableTimer() {
+  timerEnabled = true;
+  Serial.println("Timer enabled");
+}
+
+void disableTimer() {
+  timerEnabled = false;
+  timerRunning = false;
+  warmupNeeded = false;
+  warmupTime = 0;
+  drawShotTime("0s", TFT_LIGHTGREY);
+  currentShotTime = "";
+  Serial.println("Timer disabled");
+}
+
+void initTimer(float floatTemp) {
+  if (floatTemp < 50) {
+    warmupTime = 15 * 60; // 15 min
+    warmupNeeded = true;
+    timerRunning = true;
+  } else if (floatTemp < 70) {
+    warmupTime = 10 * 60; // 10 min
+    warmupNeeded = true;
+    timerRunning = true;
+  } else if (floatTemp < 85) {
+    warmupTime = 5 * 60; // 5 min
+    warmupNeeded = true;
+    timerRunning = true;
+  } else {
+    warmupTime = 0 * 60; // 0 min
+    disableTimer();
+  }
+}
+
+void updateTimer(int onTime) {
+  if (warmupNeeded) {
+  int warmupTimeDiff = warmupTime - onTime;
+  if (warmupTimeDiff < 0) {
+    disableTimer();
+  } else {
+    uint16_t color = TFT_RED;
+    char message[6];
+    if ((onTime % 5) == 0) {
+      int m = sprintf(message, "Warmup");
+    } else {
+      int warmupDiffMin = warmupTimeDiff / 60;
+      int warmupDiffSec = warmupTimeDiff - (warmupDiffMin * 60);
+      int m = sprintf(message, "%02dm%02ds", warmupDiffMin, warmupDiffSec);
+    }
+    drawShotTime(message, color);
+  }
+}
+}
+
 void drawTemperature(String temperature, uint16_t color) {
   if (currentTemperature != temperature) {
     if (currentTemperature.length() > temperature.length()) {
       tft.setTextColor(TFT_BLACK, TFT_BLACK);
-      tft.drawString(currentTemperature, tft.width() - 7, tft.height() / 4 + 10 );
+      tft.drawString(currentTemperature, tft.width() - 7, tft.height() / 4 + 10 );      
     }
   
     currentTemperature = temperature;
@@ -137,7 +204,6 @@ void drawShotTime(String shotTime, uint16_t color) {
   }
 }
 
-
 static void notifyCallback(
   BLERemoteCharacteristic* pBLERemoteCharacteristic,
   uint8_t* pData,
@@ -157,6 +223,14 @@ static void notifyCallback(
       float floatTemp = float(curTemp) / 100;
       
       drawTemperature(String(floatTemp) + "C", color);
+
+      if (timerEnabled) {
+        if (!timerRunning) {
+          initTimer(floatTemp);
+        } else {
+          updateTimer(onTime);
+        }
+      }
     } else if (sData.startsWith("sht")) {
       int i, ms;
       uint16_t color;
@@ -227,22 +301,37 @@ void wakeDisplay() {
 }
 
 void loop() {
-  if (!connected) {
-    BLEScanResults foundDevices = pBLEScan->start(scanTime, false);
-    Serial.print("Devices found: ");
-    Serial.println(foundDevices.getCount());
+  btn1.loop();
+  btn2.loop();
 
+  unsigned long currentMillis = millis();
 
-    Serial.println("Scan done!");
-    pBLEScan->clearResults();   // delete results fromBLEScan buffer to release memory
-    delay(200);
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+    if (!connected) {
+      BLEScanResults foundDevices = pBLEScan->start(scanTime, false);
+      Serial.print("Devices found: ");
+      Serial.println(foundDevices.getCount());
+  
+      Serial.println("Scan done!");
+      pBLEScan->clearResults();   // delete results fromBLEScan buffer to release memory
+      delay(200);
+    }
+  
+    if (doConnect == true) {
+      Serial.println("Found meCoffee");
+      connectToServer();
+      doConnect = false;
+    }
   }
 
-  if (doConnect == true) {
-    Serial.println("Found meCoffee");
-    connectToServer();
-    doConnect = false;
-  }
+//  delay(2000);
+}
 
-  delay(2000);
+void released(Button2& btn) {
+  if (btn == btn1) {
+    enableTimer();
+  } else if (btn == btn2) {
+    disableTimer();
+  }
 }
